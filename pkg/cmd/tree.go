@@ -18,10 +18,10 @@ package cmd
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/nickjameswebb/kubectl-tree/pkg/util"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,8 +35,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// TODO: can we descend the ownership tree?
-// TODO: write out examples, usage
+// TODO: do I need to implement all the inherited flags?
 var (
 	treeUse = "tree"
 
@@ -164,23 +163,28 @@ func (o *TreeOptions) Run() error {
 			return err
 		}
 
-		err = o.ktree(u, 0)
+		tree, err := o.buildUnstructuredTree(u)
 		if err != nil {
 			return err
 		}
+
+		tree.Print(o.Out, o.showAPIVersion, 0)
 
 		return nil
 	})
 }
 
 // TODO: can we use concurrency, builder, etc. for this
-func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
-	o.printUnstructured(u, indent)
+func (o *TreeOptions) buildUnstructuredTree(u *unstructured.Unstructured) (*util.UnstructuredTreeNode, error) {
+	tree := &util.UnstructuredTreeNode{
+		U:      u,
+		Owners: []*util.UnstructuredTreeNode{},
+	}
 
 	for _, ownerReference := range u.GetOwnerReferences() {
 		ownerReferenceGVR, err := o.getOwnerReferenceGVR(ownerReference)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		isNamespaced, err := o.groupKindIsNamespaced(schema.GroupKind{
@@ -188,7 +192,7 @@ func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
 			Kind:  ownerReference.Kind,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		namespace := ""
@@ -201,16 +205,18 @@ func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
 			Namespace(namespace).
 			Get(context.Background(), ownerReference.Name, metav1.GetOptions{})
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		err = o.ktree(unstructuredOwnerReference, indent+2)
+		subtree, err := o.buildUnstructuredTree(unstructuredOwnerReference)
 		if err != nil {
-			return err
+			return nil, err
 		}
+
+		tree.Owners = append(tree.Owners, subtree)
 	}
 
-	return nil
+	return tree, nil
 }
 
 func (o *TreeOptions) groupKindIsNamespaced(groupKind schema.GroupKind) (bool, error) {
@@ -227,25 +233,4 @@ func (o *TreeOptions) getOwnerReferenceGVR(ownerReference metav1.OwnerReference)
 		Resource: ownerReference.Kind,
 	}
 	return o.restMapper.ResourceFor(partialOwnerReferenceGVR)
-}
-
-func (o *TreeOptions) printUnstructured(u *unstructured.Unstructured, indent int) {
-	indentation := strings.Repeat(" ", indent)
-	if o.showAPIVersion {
-		fmt.Fprintf(o.Out, "%s%s %s %s -n %s\n",
-			indentation,
-			u.GetAPIVersion(),
-			u.GetKind(),
-			u.GetName(),
-			u.GetNamespace(),
-		)
-	} else {
-		fmt.Fprintf(o.Out, "%s%s %s -n %s\n",
-			indentation,
-			u.GetKind(),
-			u.GetName(),
-			u.GetNamespace(),
-		)
-	}
-
 }
