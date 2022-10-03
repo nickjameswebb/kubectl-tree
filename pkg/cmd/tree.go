@@ -35,9 +35,26 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// TODO: can we descend the ownership tree?
 // TODO: write out examples, usage
 var (
-	treeExample = ``
+	treeUse = "tree"
+
+	treeShort = "View the ownership tree of a resource"
+
+	treeExample = `
+	# view an ownership tree of all pods in kube-system namespace
+	kubectl tree pods -n kube-system
+
+	# view an ownership tree of all pods in all namespaces
+	kubectl tree pods -A
+
+	# view an ownership tree of a specific pod in kube-system namespace
+	kubectl tree pods/foo -n kube-system
+
+	# optionally display API version in ownership tree
+	kubectl tree pods/foo -n kube-system --show-api-version=true
+`
 )
 
 type TreeOptions struct {
@@ -48,7 +65,7 @@ type TreeOptions struct {
 	args        []string
 	builder     *resource.Builder
 
-	// TODO: implement AllNamespaces
+	allNamespaces  bool
 	namespace      string
 	showAPIVersion bool
 
@@ -66,8 +83,8 @@ func NewCmdTree(streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewTreeOptions(streams)
 
 	cmd := &cobra.Command{
-		Use:          "tree",
-		Short:        "View a dep tree",
+		Use:          treeUse,
+		Short:        treeShort,
 		Example:      treeExample,
 		SilenceUsage: true,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -85,6 +102,7 @@ func NewCmdTree(streams genericclioptions.IOStreams) *cobra.Command {
 		},
 	}
 
+	cmd.Flags().BoolVarP(&o.allNamespaces, "all-namespaces", "A", o.allNamespaces, "If present, view a tree for object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
 	cmd.Flags().BoolVar(&o.showAPIVersion, "show-api-version", false, "Show API Version in output")
 	o.configFlags.AddFlags(cmd.Flags())
 
@@ -126,7 +144,8 @@ func (o *TreeOptions) Validate() error {
 func (o *TreeOptions) Run() error {
 	r := o.builder.
 		Unstructured().
-		NamespaceParam(o.namespace).
+		NamespaceParam(o.namespace).DefaultNamespace().
+		AllNamespaces(o.allNamespaces).
 		ResourceTypeOrNameArgs(true, o.args...).
 		Flatten().
 		Latest().
@@ -154,7 +173,6 @@ func (o *TreeOptions) Run() error {
 	})
 }
 
-// TODO: doesn't work with cluster level owner
 // TODO: can we use concurrency, builder, etc. for this
 func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
 	o.printUnstructured(u, indent)
@@ -175,7 +193,7 @@ func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
 
 		namespace := ""
 		if isNamespaced {
-			namespace = o.namespace
+			namespace = u.GetNamespace()
 		}
 
 		unstructuredOwnerReference, err := o.client.
@@ -186,7 +204,7 @@ func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
 			return err
 		}
 
-		err = o.ktree(unstructuredOwnerReference, indent+4)
+		err = o.ktree(unstructuredOwnerReference, indent+2)
 		if err != nil {
 			return err
 		}
