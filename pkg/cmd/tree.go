@@ -28,31 +28,29 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
 )
 
+// TODO: write out examples, usage
 var (
 	treeExample = ``
-
-	// errNoContext = fmt.Errorf("no context is currently set, use %q to select a new one", "kubectl config use-context <context>")
 )
-
-type UserInput struct {
-	name           string
-	kind           string
-	namespace      string
-	showAPIVersion bool
-}
 
 type TreeOptions struct {
 	configFlags *genericclioptions.ConfigFlags
 	config      *rest.Config
 	client      dynamic.Interface
 	restMapper  meta.RESTMapper
-	userInput   *UserInput
 	args        []string
+	builder     *resource.Builder
+
+	// TODO: implement AllNamespaces
+	namespace      string
+	showAPIVersion bool
 
 	genericclioptions.IOStreams
 }
@@ -61,7 +59,6 @@ func NewTreeOptions(streams genericclioptions.IOStreams) *TreeOptions {
 	return &TreeOptions{
 		configFlags: genericclioptions.NewConfigFlags(true),
 		IOStreams:   streams,
-		userInput:   &UserInput{},
 	}
 }
 
@@ -72,7 +69,7 @@ func NewCmdTree(streams genericclioptions.IOStreams) *cobra.Command {
 		Use:          "tree",
 		Short:        "View a dep tree",
 		Example:      treeExample,
-		SilenceUsage: false,
+		SilenceUsage: true,
 		RunE: func(c *cobra.Command, args []string) error {
 			if err := o.Complete(c, args); err != nil {
 				return err
@@ -88,11 +85,7 @@ func NewCmdTree(streams genericclioptions.IOStreams) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&o.userInput.showAPIVersion, "show-api-version", false, "Show API Version in output")
-	cmd.Flags().StringVar(&o.userInput.name, "name", "", "Name of resource")
-	cmd.MarkFlagRequired("name")
-	cmd.Flags().StringVarP(&o.userInput.kind, "kind", "", "", "Kind of resource")
-	cmd.MarkFlagRequired("kind")
+	cmd.Flags().BoolVar(&o.showAPIVersion, "show-api-version", false, "Show API Version in output")
 	o.configFlags.AddFlags(cmd.Flags())
 
 	return cmd
@@ -117,10 +110,11 @@ func (o *TreeOptions) Complete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	o.userInput.namespace, err = cmd.Flags().GetString("namespace")
-	if err != nil {
-		return err
+	if o.configFlags.Namespace != nil {
+		o.namespace = *o.configFlags.Namespace
 	}
+
+	o.builder = resource.NewBuilder(o.configFlags)
 
 	return nil
 }
@@ -130,54 +124,96 @@ func (o *TreeOptions) Validate() error {
 }
 
 func (o *TreeOptions) Run() error {
-	partialGVR := schema.GroupVersionResource{
-		Resource: o.userInput.kind,
-	}
-	gvr, err := o.restMapper.ResourceFor(partialGVR)
-	if err != nil {
+	r := o.builder.
+		Unstructured().
+		NamespaceParam(o.namespace).
+		ResourceTypeOrNameArgs(true, o.args...).
+		Flatten().
+		Latest().
+		Do()
+	if err := r.Err(); err != nil {
 		return err
 	}
 
-	unstructuredResource, err := o.client.Resource(gvr).Namespace(o.userInput.namespace).Get(context.Background(), o.userInput.name, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
+	return r.Visit(func(info *resource.Info, err error) error {
+		if err != nil {
+			return err
+		}
 
-	err = o.ktree(unstructuredResource, 0)
-	if err != nil {
-		return err
+		u := &unstructured.Unstructured{}
+		if err := scheme.Scheme.Convert(info.Object, u, nil); err != nil {
+			return err
+		}
+
+		err = o.ktree(u, 0)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+// TODO: doesn't work with cluster level owner
+// TODO: can we use concurrency, builder, etc. for this
+func (o *TreeOptions) ktree(u *unstructured.Unstructured, indent int) error {
+	o.printUnstructured(u, indent)
+
+	for _, ownerReference := range u.GetOwnerReferences() {
+		ownerReferenceGVR, err := o.getOwnerReferenceGVR(ownerReference)
+		if err != nil {
+			return err
+		}
+
+		isNamespaced, err := o.groupKindIsNamespaced(schema.GroupKind{
+			Group: ownerReferenceGVR.Group,
+			Kind:  ownerReference.Kind,
+		})
+		if err != nil {
+			return err
+		}
+
+		namespace := ""
+		if isNamespaced {
+			namespace = o.namespace
+		}
+
+		unstructuredOwnerReference, err := o.client.
+			Resource(ownerReferenceGVR).
+			Namespace(namespace).
+			Get(context.Background(), ownerReference.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		err = o.ktree(unstructuredOwnerReference, indent+4)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (o *TreeOptions) ktree(unstructured *unstructured.Unstructured, indent int) error {
-	o.printUnstructured(unstructured, indent)
-
-	for _, ownerReference := range unstructured.GetOwnerReferences() {
-		partialOwnerReferenceGVR := schema.GroupVersionResource{
-			Resource: ownerReference.Kind,
-		}
-		ownerReferenceGVR, err := o.restMapper.ResourceFor(partialOwnerReferenceGVR)
-		if err != nil {
-			return err
-		}
-		unstructuredOwnerReference, err := o.client.Resource(ownerReferenceGVR).Namespace(o.userInput.namespace).Get(context.Background(), ownerReference.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		err = o.ktree(unstructuredOwnerReference, indent+2)
-		if err != nil {
-			return err
-		}
+func (o *TreeOptions) groupKindIsNamespaced(groupKind schema.GroupKind) (bool, error) {
+	restMapping, err := o.restMapper.RESTMapping(groupKind)
+	if err != nil {
+		return false, err
 	}
 
-	return nil
+	return restMapping.Scope.Name() == "namespace", nil
+}
+
+func (o *TreeOptions) getOwnerReferenceGVR(ownerReference metav1.OwnerReference) (schema.GroupVersionResource, error) {
+	partialOwnerReferenceGVR := schema.GroupVersionResource{
+		Resource: ownerReference.Kind,
+	}
+	return o.restMapper.ResourceFor(partialOwnerReferenceGVR)
 }
 
 func (o *TreeOptions) printUnstructured(u *unstructured.Unstructured, indent int) {
 	indentation := strings.Repeat(" ", indent)
-	if o.userInput.showAPIVersion {
+	if o.showAPIVersion {
 		fmt.Fprintf(o.Out, "%s%s %s %s -n %s\n",
 			indentation,
 			u.GetAPIVersion(),

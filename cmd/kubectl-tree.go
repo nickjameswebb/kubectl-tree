@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/spf13/pflag"
@@ -32,6 +33,7 @@ func main() {
 
 	root := cmd.NewCmdTree(genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr})
 	if err := root.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "kubectl-tree failed: %v\n", err)
 		os.Exit(1)
 	}
 }
