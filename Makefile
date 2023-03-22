@@ -1,4 +1,4 @@
-.DEFAULT_GOAL: build
+.DEFAULT_GOAL: install
 
 .PHONY: install
 install:
